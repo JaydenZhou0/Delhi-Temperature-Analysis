@@ -1,0 +1,196 @@
+---
+title: "STAT425"
+author: "Ivy Gu & Jayden Zhou" 
+date: "2025-04-20"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Read in data
+```{r}
+library(MASS)
+library(lmtest)
+climate = read.csv("DailyDelhiClimateTrain.csv")
+```
+
+remove outliers based on IQR
+```{r}
+remove_outliers_iqr <- function(df, columns) {
+  for (col in columns) {
+    Q1 <- quantile(df[[col]], 0.25, na.rm = TRUE)
+    Q3 <- quantile(df[[col]], 0.75, na.rm = TRUE)
+    IQR_value <- Q3 - Q1
+    lower_bound <- Q1 - 1.5 * IQR_value
+    upper_bound <- Q3 + 1.5 * IQR_value
+    df <- df[df[[col]] >= lower_bound & df[[col]] <= upper_bound, ]
+  }
+  return(df)
+}
+
+climate_clean <- remove_outliers_iqr(climate, c("humidity", "wind_speed", "meanpressure", "meantemp"))
+```
+
+Groupby --> Year_Month
+```{r}
+library(tidyr)
+
+# 拆成三个列：year, month, day
+climate_clean <- separate(climate_clean, col = date, into = c("year", "month", "day"), sep = "-")
+
+# 然后再创建 year_month
+climate_clean$year_month <- paste(climate_clean$year, climate_clean$month, sep = "-")
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(dplyr)
+
+monthly_avg <- climate_clean %>%
+  group_by(year_month) %>%
+  summarise(
+    avg_temp = mean(meantemp, na.rm = TRUE),
+    avg_humidity = mean(humidity, na.rm = TRUE),
+    avg_pressure = mean(meanpressure, na.rm = TRUE),
+    avg_wind_speed = mean(wind_speed, na.rm = TRUE)
+  )
+```
+
+
+Histogram
+```{r}
+hist(monthly_avg$avg_humidity)
+hist(monthly_avg$avg_wind_speed)
+hist(monthly_avg$avg_pressure)
+
+monthly_avg$log_avg_wind_speed = sqrt(monthly_avg$avg_wind_speed+1)
+monthly_avg$log_avg_pressure = log(monthly_avg$avg_pressure+1)
+
+hist(monthly_avg$log_avg_wind_speed)
+hist(monthly_avg$log_avg_pressure)
+
+climate_mod  = lm(avg_temp~avg_humidity+avg_pressure+avg_wind_speed, data = monthly_avg)
+
+monthly_avg$residual <- residuals(climate_mod)
+monthly_avg$year_month_date <- as.Date(paste0(monthly_avg$year_month, "-01"))
+```
+
+Collinearity Check
+```{r}
+vif(climate_mod)
+x = model.matrix(climate_mod)[,-1]
+x = x- matrix(apply(x, 2, mean), 49, 3, byrow = TRUE)
+x = x / matrix(apply(x, 2, sd), 49, 3, byrow = TRUE)
+apply(x, 2, mean)
+apply(x, 2, var)
+e = eigen(t(x) %*% x)
+sqrt(e$val[1]/e$val)
+```
+
+Diagnostics
+```{r}
+par(mfrow = c(1,2))
+plot(climate_mod)
+par(mfrow = c(1,1))
+
+bptest(climate_mod)
+
+shapiro.test(residuals(climate_mod))
+```
+
+
+Residuals vs Time"
+```{r}
+library(ggplot2)
+
+ggplot(monthly_avg, aes(x = year_month_date, y = residual)) +
+  geom_point(shape = 1) +      
+  geom_line() +                        
+  geom_hline(yintercept = 0,            
+             color = "blue", linetype = "dashed") +
+  labs(title = "Residuals vs Time",
+       x = "Time (Year-Month)",
+       y = "Residuals") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+View(monthly_avg)
+```
+
+
+dwtest:auto-correlation
+```{r}
+dwtest(climate_mod)
+```
+
+Using AR1 model
+
+```{r}
+monthly_avg$year_month <- gsub("-", "", monthly_avg$year_month)
+library(nlme)
+gls_mod = gls(avg_temp ~ avg_humidity + avg_pressure + avg_wind_speed, correlation = corAR1(form = ~ as.numeric(year_month)), data = monthly_avg)
+intervals(gls_mod)
+```
+
+
+Seasons
+```{r}
+monthly_avg$month <- as.numeric(monthly_avg$year_month) %% 100
+
+monthly_avg$season <- ifelse(monthly_avg$month %in% c(12, 1, 2), "Winter",
+              ifelse(monthly_avg$month %in% c(3, 4, 5), "Spring",
+              ifelse(monthly_avg$month %in% c(6, 7, 8), "Summer",
+              ifelse(monthly_avg$month %in% c(9, 10, 11), "Autumn", NA))))
+```
+
+ANCOVA
+```{r}
+Amodel <- lm(avg_temp ~ avg_humidity + avg_pressure + avg_wind_speed + season + avg_humidity:season + avg_pressure:season + avg_wind_speed:season, data = monthly_avg)
+anova(Amodel)
+
+# 删掉了avg_wind_speed:season
+Bmodel <- lm(avg_temp ~ avg_humidity + avg_pressure + avg_wind_speed + season + avg_pressure:season + avg_humidity:season, data = monthly_avg)
+anova(Bmodel)
+
+# 删掉了avg_humidity:season
+Cmodel <- lm(avg_temp ~ avg_humidity + avg_pressure + avg_wind_speed + season + avg_pressure:season, data = monthly_avg)
+anova(Cmodel)
+
+Dmodel <- lm(avg_temp ~ avg_humidity + avg_pressure + season + avg_pressure:season + avg_wind_speed, data = monthly_avg)
+anova(Dmodel)
+summary(Dmodel)
+
+ANCOVA_model <- lm(avg_temp ~ avg_humidity + avg_pressure + season + avg_pressure:season, data = monthly_avg)
+anova(ANCOVA_model)
+
+```
+
+
+```{r}
+rmse <- function(x,y) sqrt(mean((x - y)^2))
+rmse(fitted(gls_mod), monthly_avg$avg_temp)
+rmse(fitted(ANCOVA_model), monthly_avg$avg_temp)
+rmse(fitted(climate_mod), monthly_avg$avg_temp)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
